@@ -38,6 +38,13 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __asyncValues = (this && this.__asyncValues) || function (o) {
+    if (!Symbol.asyncIterator) throw new TypeError("Symbol.asyncIterator is not defined.");
+    var m = o[Symbol.asyncIterator], i;
+    return m ? m.call(o) : (o = typeof __values === "function" ? __values(o) : o[Symbol.iterator](), i = {}, verb("next"), verb("throw"), verb("return"), i[Symbol.asyncIterator] = function () { return this; }, i);
+    function verb(n) { i[n] = o[n] && function (v) { return new Promise(function (resolve, reject) { v = o[n](v), settle(resolve, reject, v.done, v.value); }); }; }
+    function settle(resolve, reject, d, v) { Promise.resolve(v).then(function(v) { resolve({ value: v, done: d }); }, reject); }
+};
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -330,7 +337,8 @@ function main() {
             doNotSkip: getDoNotSkipInput('do_not_skip'),
             concurrentSkipping: getConcurrentSkippingInput('concurrent_skipping'),
             cancelOthers: core.getBooleanInput('cancel_others'),
-            skipAfterSuccessfulDuplicates: core.getBooleanInput('skip_after_successful_duplicate')
+            skipAfterSuccessfulDuplicates: core.getBooleanInput('skip_after_successful_duplicate'),
+            reusableWorkflowFilepath: core.getInput('reusable_workflow_filepath')
         };
         const repo = github.context.repo;
         const octokit = new Octokit((0, utils_1.getOctokitOptions)(token));
@@ -356,8 +364,16 @@ function main() {
       `);
         }
         const currentRun = mapWorkflowRun(apiCurrentRun, currentTreeHash);
-        // Fetch list of runs for current workflow.
-        const { data: { workflow_runs: apiAllRuns } } = yield octokit.rest.actions.listWorkflowRuns(Object.assign(Object.assign({}, repo), { workflow_id: currentRun.workflowId, per_page: 100 }));
+        let apiAllRuns;
+        if ((inputs === null || inputs === void 0 ? void 0 : inputs.reusableWorkflowFilepath.length) > 0) {
+            // if we want all runs of a reusable workflow, we need to look at all runs, not just the current workflow
+            apiAllRuns = yield findRunsOfReusableWorkflows({ repo, octokit }, inputs.reusableWorkflowFilepath);
+        }
+        else {
+            // Fetch list of runs for current workflow.
+            const { data: { workflow_runs } } = yield octokit.rest.actions.listWorkflowRuns(Object.assign(Object.assign({}, repo), { workflow_id: currentRun.workflowId, per_page: 100 }));
+            apiAllRuns = workflow_runs;
+        }
         // List with all workflow runs.
         const allRuns = [];
         // List with older workflow runs only (used to prevent some nasty race conditions and edge cases).
@@ -437,7 +453,7 @@ function exitSuccess(args) {
             summary.push('<tr>', '<td>Changed Files</td>', `<td>${changedFiles}</td>`, '</tr>');
         }
         summary.push('</table>');
-        const skipSummary = core.getBooleanInput("skip_summary");
+        const skipSummary = core.getBooleanInput('skip_summary');
         if (!skipSummary) {
             yield core.summary.addRaw(summary.join('')).write();
         }
@@ -479,6 +495,61 @@ function getStringArrayInput(name) {
         }
         exitFail(`Input '${rawInput}' is not a valid JSON`);
     }
+}
+function findRunsOfReusableWorkflows({ octokit, repo }, reusableWorkflowFilepath, limit = 100) {
+    var _a, e_1, _b, _c;
+    var _d;
+    return __awaiter(this, void 0, void 0, function* () {
+        // remove the leading slash
+        let searchTarget = reusableWorkflowFilepath.replace(/^\/+/, '');
+        // append @ if not present anywhere in the string
+        if (!searchTarget.includes('@')) {
+            searchTarget += '@';
+        }
+        const searchTargetWithRepo = `${repo.owner}/${repo.repo}/${searchTarget}`;
+        core.debug(`Searching for reusable workflow runs using: '${searchTarget}' & '${searchTargetWithRepo}'`);
+        const foundRuns = [];
+        // This will go through all runs of the repo, 100 at a time.
+        const iterator = octokit.paginate.iterator(octokit.rest.actions.listWorkflowRunsForRepo, Object.assign(Object.assign({}, repo), { per_page: 100 // Fetch 100 at a time
+         }));
+        try {
+            for (var _e = true, iterator_1 = __asyncValues(iterator), iterator_1_1; iterator_1_1 = yield iterator_1.next(), _a = iterator_1_1.done, !_a;) {
+                _c = iterator_1_1.value;
+                _e = false;
+                try {
+                    const { data: runs } = _c;
+                    for (const run of runs) {
+                        // Check if the 'referenced_workflows' array exists and has our path
+                        const isReferenced = (_d = run.referenced_workflows) === null || _d === void 0 ? void 0 : _d.some(wf => wf.path.startsWith(searchTarget) ||
+                            wf.path.startsWith(searchTargetWithRepo));
+                        if (isReferenced) {
+                            core.debug(`Found candidate reusable workflow run: ${run.html_url}`);
+                            foundRuns.push(run);
+                        }
+                        if (foundRuns.length >= limit) {
+                            core.debug('Limit reached searching for reusable workflow runs. Stopping.');
+                            break;
+                        }
+                    }
+                    if (foundRuns.length >= limit) {
+                        break;
+                    }
+                }
+                finally {
+                    _e = true;
+                }
+            }
+        }
+        catch (e_1_1) { e_1 = { error: e_1_1 }; }
+        finally {
+            try {
+                if (!_e && !_a && (_b = iterator_1.return)) yield _b.call(iterator_1);
+            }
+            finally { if (e_1) throw e_1.error; }
+        }
+        core.debug(`Found ${foundRuns.length} candidate reusable workflow runs.`);
+        return foundRuns;
+    });
 }
 function getDoNotSkipInput(name) {
     const rawInput = core.getInput(name);

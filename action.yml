@@ -40,6 +40,9 @@ inputs:
     description: 'If true, make the workflow logs shorter'
     required: false
     default: 'false'
+  reusable_workflow_filepath:
+    description: 'Use this if you want to skip duplicate runs of a reusable workflow, even when they were called from a different parent workflow. This should be the full path of the workflow from the repo root. For reusable workflows in a different repo, ensure that you specify the full path including organisation and repo name.'
+    required: false
 outputs:
   should_skip:
     description: 'Returns true if the current run should be skipped according to your configured rules'

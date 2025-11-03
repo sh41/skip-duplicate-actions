@@ -147,6 +147,14 @@ One of `never`, `same_content`, `same_content_newer`, `outdated_runs`, `always`.
 
 **Default:** `'never'`
 
+### `reusable_workflow_filepath`
+**EXPERIMENTAL**
+Setting this will retrieve the most recent 100 workflow runs that reference the specified reusable workflow file and substitute it for the usual list of workflow runs to check for matching tree hashes. If you reference a reusable workflow that behaves differently in different contexts, this will still skip the calling workflow for any successful run against the same context. Due to the limitations of the GitHub Actions API you must manually specify the full filepath of the reusable workflow.     
+
+Example (reusable workflow in the same repo): `'.github/workflows/my-reusable-workflow.yml'`
+Example (reusable workflow in a different repo): `'OTHER_ORG/OTHER_REPO/.github/workflows/my-reusable-workflow-from-a-different-repo.yml'`
+Default: `undefined`
+
 ## Outputs
 
 ### `should_skip`
@@ -299,7 +307,6 @@ jobs:
 
 > [!WARNING]  
 > If the paths_filter option is not working correctly, then you could copy the “example 1" multiple times according to your needs (see <https://github.com/fkirc/skip-duplicate-actions/issues/326> for details).
-
 
 The `paths_filter` option can be used if you have multiple jobs in a workflow and want to skip them based on different [`paths_ignore`](#paths_ignore) / [`paths`](#paths) patterns. When defining such filters, the action returns corresponding information in the [`paths_result`](#paths_result) output.
 For example in a monorepo, you might want to run jobs related to the "frontend" only if some files in the corresponding "frontend/" folder have changed and the same for "backend". This can be achieved with the following configuration:

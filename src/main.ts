@@ -89,6 +89,7 @@ type Inputs = {
   concurrentSkipping: ConcurrentSkipping
   cancelOthers: boolean
   skipAfterSuccessfulDuplicates: boolean
+  reusableWorkflowFilepath: string
 }
 
 type Context = {
@@ -459,7 +460,8 @@ async function main(): Promise<void> {
     cancelOthers: core.getBooleanInput('cancel_others'),
     skipAfterSuccessfulDuplicates: core.getBooleanInput(
       'skip_after_successful_duplicate'
-    )
+    ),
+    reusableWorkflowFilepath: core.getInput('reusable_workflow_filepath')
   }
 
   const repo = github.context.repo
@@ -490,14 +492,24 @@ async function main(): Promise<void> {
   }
   const currentRun = mapWorkflowRun(apiCurrentRun, currentTreeHash)
 
-  // Fetch list of runs for current workflow.
-  const {
-    data: {workflow_runs: apiAllRuns}
-  } = await octokit.rest.actions.listWorkflowRuns({
-    ...repo,
-    workflow_id: currentRun.workflowId,
-    per_page: 100
-  })
+  let apiAllRuns: ApiWorkflowRun[]
+  if (inputs?.reusableWorkflowFilepath.length > 0) {
+    // if we want all runs of a reusable workflow, we need to look at all runs, not just the current workflow
+    apiAllRuns = await findRunsOfReusableWorkflows(
+      {repo, octokit},
+      inputs.reusableWorkflowFilepath
+    )
+  } else {
+    // Fetch list of runs for current workflow.
+    const {
+      data: {workflow_runs}
+    } = await octokit.rest.actions.listWorkflowRuns({
+      ...repo,
+      workflow_id: currentRun.workflowId,
+      per_page: 100
+    })
+    apiAllRuns = workflow_runs
+  }
 
   // List with all workflow runs.
   const allRuns = []
@@ -611,7 +623,7 @@ async function exitSuccess(args: {
     )
   }
   summary.push('</table>')
-  const skipSummary = core.getBooleanInput("skip_summary")
+  const skipSummary = core.getBooleanInput('skip_summary')
   if (!skipSummary) {
     await core.summary.addRaw(summary.join('')).write()
   }
@@ -657,6 +669,60 @@ function getStringArrayInput(name: string): string[] {
     }
     exitFail(`Input '${rawInput}' is not a valid JSON`)
   }
+}
+
+async function findRunsOfReusableWorkflows(
+  {octokit, repo}: Pick<Context, 'octokit' | 'repo'>,
+  reusableWorkflowFilepath: string,
+  limit = 100
+): Promise<ApiWorkflowRun[]> {
+  // remove the leading slash
+  let searchTarget = reusableWorkflowFilepath.replace(/^\/+/, '')
+  // append @ if not present anywhere in the string
+  if (!searchTarget.includes('@')) {
+    searchTarget += '@'
+  }
+  const searchTargetWithRepo = `${repo.owner}/${repo.repo}/${searchTarget}`
+  core.debug(
+    `Searching for reusable workflow runs using: '${searchTarget}' & '${searchTargetWithRepo}'`
+  )
+  const foundRuns: ApiWorkflowRun[] = []
+  // This will go through all runs of the repo, 100 at a time.
+  const iterator = octokit.paginate.iterator(
+    octokit.rest.actions.listWorkflowRunsForRepo,
+    {
+      ...repo,
+      per_page: 100 // Fetch 100 at a time
+    }
+  )
+  for await (const {data: runs} of iterator) {
+    for (const run of runs) {
+      // Check if the 'referenced_workflows' array exists and has our path
+      const isReferenced = run.referenced_workflows?.some(
+        wf =>
+          wf.path.startsWith(searchTarget) ||
+          wf.path.startsWith(searchTargetWithRepo)
+      )
+
+      if (isReferenced) {
+        core.debug(`Found candidate reusable workflow run: ${run.html_url}`)
+        foundRuns.push(run)
+      }
+
+      if (foundRuns.length >= limit) {
+        core.debug(
+          'Limit reached searching for reusable workflow runs. Stopping.'
+        )
+        break
+      }
+    }
+
+    if (foundRuns.length >= limit) {
+      break
+    }
+  }
+  core.debug(`Found ${foundRuns.length} candidate reusable workflow runs.`)
+  return foundRuns
 }
 
 function getDoNotSkipInput(name: string): WorkflowRunTrigger[] {
