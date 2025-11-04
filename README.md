@@ -155,6 +155,12 @@ Example (reusable workflow in the same repo): `'.github/workflows/my-reusable-wo
 Example (reusable workflow in a different repo): `'OTHER_ORG/OTHER_REPO/.github/workflows/my-reusable-workflow-from-a-different-repo.yml'`
 Default: `undefined`
 
+### `include_previous_attempts_of_same_run`
+
+If set to true, previous attempts to run the current workflow run are considered in the skip duplicate checks.
+
+Default `'false'`
+
 ## Outputs
 
 ### `should_skip`

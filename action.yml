@@ -43,6 +43,10 @@ inputs:
   reusable_workflow_filepath:
     description: 'Use this if you want to skip duplicate runs of a reusable workflow, even when they were called from a different parent workflow. This should be the full path of the workflow from the repo root. For reusable workflows in a different repo, ensure that you specify the full path including organisation and repo name.'
     required: false
+  include_previous_attempts_of_same_run:
+    description: 'If set to true, previous attempts to run the current workflow run are considered in the skip duplicate checks.'
+    required: false
+    default: 'false'
 outputs:
   should_skip:
     description: 'Returns true if the current run should be skipped according to your configured rules'

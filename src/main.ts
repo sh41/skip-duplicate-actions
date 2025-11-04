@@ -2,6 +2,7 @@ import * as core from '@actions/core'
 import * as github from '@actions/github'
 import {getOctokitOptions, GitHub} from '@actions/github/lib/utils'
 import {retry} from '@octokit/plugin-retry'
+import {RequestError} from '@octokit/request-error'
 import type {Endpoints} from '@octokit/types'
 import micromatch from 'micromatch'
 import yaml from 'js-yaml'
@@ -39,6 +40,7 @@ type WorkflowRunConclusion =
 interface WorkflowRun {
   id: number
   runNumber: number
+  runAttempt: number | undefined
   event: WorkflowRunTrigger
   treeHash: string
   commitHash: string
@@ -90,6 +92,7 @@ type Inputs = {
   cancelOthers: boolean
   skipAfterSuccessfulDuplicates: boolean
   reusableWorkflowFilepath: string
+  includePreviousAttemptsOfSameRun: boolean
 }
 
 type Context = {
@@ -461,7 +464,10 @@ async function main(): Promise<void> {
     skipAfterSuccessfulDuplicates: core.getBooleanInput(
       'skip_after_successful_duplicate'
     ),
-    reusableWorkflowFilepath: core.getInput('reusable_workflow_filepath')
+    reusableWorkflowFilepath: core.getInput('reusable_workflow_filepath'),
+    includePreviousAttemptsOfSameRun: core.getBooleanInput(
+      'include_previous_attempts_of_same_run'
+    )
   }
 
   const repo = github.context.repo
@@ -511,6 +517,12 @@ async function main(): Promise<void> {
     apiAllRuns = workflow_runs
   }
 
+  if (inputs.includePreviousAttemptsOfSameRun) {
+    // add any previous attempts for the current run.
+    apiAllRuns.push(
+      ...(await getPreviousRunAttempts({octokit, repo, currentRun}))
+    )
+  }
   // List with all workflow runs.
   const allRuns = []
   // List with older workflow runs only (used to prevent some nasty race conditions and edge cases).
@@ -518,9 +530,17 @@ async function main(): Promise<void> {
 
   // Check and map all runs.
   for (const run of apiAllRuns) {
-    // Filter out current run and runs that lack 'head_commit' (most likely runs associated with a headless or removed commit).
+    // Filter out the current run attempt and runs that lack 'head_commit' (most likely runs associated with a headless or removed commit).
     // See https://github.com/fkirc/skip-duplicate-actions/pull/178.
-    if (run.id !== currentRun.id && run.head_commit) {
+    if (
+      !(
+        run.id === currentRun.id &&
+        (!inputs.includePreviousAttemptsOfSameRun ||
+          typeof currentRun.runAttempt === 'undefined' ||
+          run.run_attempt === currentRun.runAttempt)
+      ) &&
+      run.head_commit
+    ) {
       const mappedRun = mapWorkflowRun(run, run.head_commit.tree_id)
       // Add to list of all runs.
       allRuns.push(mappedRun)
@@ -530,6 +550,15 @@ async function main(): Promise<void> {
         new Date(currentRun.createdAt).getTime()
       ) {
         olderRuns.push(mappedRun)
+      } else if (
+        inputs.includePreviousAttemptsOfSameRun &&
+        isPreviousAttemptAtThisRun(currentRun, mappedRun)
+      ) {
+        olderRuns.push(mappedRun)
+      } else {
+        core.debug(
+          `Filtered out due to createdAt time being newer than this run's creation time: ${run.html_url}`
+        )
       }
     }
   }
@@ -551,6 +580,7 @@ function mapWorkflowRun(
   return {
     id: run.id,
     runNumber: run.run_number,
+    runAttempt: run.run_attempt,
     event: run.event as WorkflowRunTrigger,
     treeHash,
     commitHash: run.head_sha,
@@ -796,6 +826,69 @@ function getPathsFilterInput(name: string): PathsFilter {
     }
     exitFail(`Input '${rawInput}' is invalid`)
   }
+}
+
+/**
+ * Fetches all previous attempts for the current workflow run.
+ * @param octokit
+ * @param repo
+ * @param currentRunId - The unique ID of the workflow run.
+ * @param currentAttempt - The current attempt
+ * @returns A promise that resolves to an array of workflow run objects.
+ */
+async function getPreviousRunAttempts({
+  octokit,
+  repo,
+  currentRun: {id: currentRunId, runAttempt: currentRunAttempt}
+}: Pick<Context, 'octokit' | 'repo' | 'currentRun'>): Promise<
+  ApiWorkflowRun[]
+> {
+  // We'll store all the resulting attempt objects here
+  const allAttemptsData: ApiWorkflowRun[] = [] // Use a more specific type if you have it
+  let attemptNumber = 1
+  // Use a traditional for loop to iterate from 1 to currentAttempt
+  while (
+    typeof currentRunAttempt === 'undefined' ||
+    attemptNumber < currentRunAttempt
+  ) {
+    core.debug(`Fetching attempt ${attemptNumber}...`)
+    try {
+      // Wait for the single request to complete
+      const response = await octokit.rest.actions.getWorkflowRunAttempt({
+        ...repo,
+        run_id: currentRunId,
+        attempt_number: attemptNumber
+      })
+
+      // Add the result to our array
+      allAttemptsData.push(response.data)
+
+      attemptNumber++
+    } catch (error: unknown) {
+      // This stops us from carrying on indefinitely if we don't know the current run attempt.
+      if (error instanceof RequestError && error.status === 404) {
+        break
+      }
+      // For any other error (rate limit, auth, etc.), log it and stop.
+      core.error(`Failed to retrieve attempt ${attemptNumber}`)
+      throw error // Re-throw the unexpected error
+    }
+  }
+
+  core.debug('')
+  return allAttemptsData
+}
+
+function isPreviousAttemptAtThisRun(
+  {runAttempt: currentRunAttempt, id: currentRunId}: WorkflowRun,
+  {runAttempt, id}: WorkflowRun
+): boolean {
+  return (
+    currentRunId === id &&
+    typeof runAttempt !== 'undefined' &&
+    typeof currentRunAttempt !== 'undefined' &&
+    runAttempt < currentRunAttempt
+  )
 }
 
 main()

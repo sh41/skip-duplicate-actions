@@ -53,6 +53,7 @@ const core = __importStar(__nccwpck_require__(2186));
 const github = __importStar(__nccwpck_require__(5438));
 const utils_1 = __nccwpck_require__(3030);
 const plugin_retry_1 = __nccwpck_require__(6298);
+const request_error_1 = __nccwpck_require__(537);
 const micromatch_1 = __importDefault(__nccwpck_require__(6228));
 const js_yaml_1 = __importDefault(__nccwpck_require__(1917));
 // Register 'retry' plugin with default values
@@ -338,7 +339,8 @@ function main() {
             concurrentSkipping: getConcurrentSkippingInput('concurrent_skipping'),
             cancelOthers: core.getBooleanInput('cancel_others'),
             skipAfterSuccessfulDuplicates: core.getBooleanInput('skip_after_successful_duplicate'),
-            reusableWorkflowFilepath: core.getInput('reusable_workflow_filepath')
+            reusableWorkflowFilepath: core.getInput('reusable_workflow_filepath'),
+            includePreviousAttemptsOfSameRun: core.getBooleanInput('include_previous_attempts_of_same_run')
         };
         const repo = github.context.repo;
         const octokit = new Octokit((0, utils_1.getOctokitOptions)(token));
@@ -374,15 +376,23 @@ function main() {
             const { data: { workflow_runs } } = yield octokit.rest.actions.listWorkflowRuns(Object.assign(Object.assign({}, repo), { workflow_id: currentRun.workflowId, per_page: 100 }));
             apiAllRuns = workflow_runs;
         }
+        if (inputs.includePreviousAttemptsOfSameRun) {
+            // add any previous attempts for the current run.
+            apiAllRuns.push(...(yield getPreviousRunAttempts({ octokit, repo, currentRun })));
+        }
         // List with all workflow runs.
         const allRuns = [];
         // List with older workflow runs only (used to prevent some nasty race conditions and edge cases).
         const olderRuns = [];
         // Check and map all runs.
         for (const run of apiAllRuns) {
-            // Filter out current run and runs that lack 'head_commit' (most likely runs associated with a headless or removed commit).
+            // Filter out the current run attempt and runs that lack 'head_commit' (most likely runs associated with a headless or removed commit).
             // See https://github.com/fkirc/skip-duplicate-actions/pull/178.
-            if (run.id !== currentRun.id && run.head_commit) {
+            if (!(run.id === currentRun.id &&
+                (!inputs.includePreviousAttemptsOfSameRun ||
+                    typeof currentRun.runAttempt === 'undefined' ||
+                    run.run_attempt === currentRun.runAttempt)) &&
+                run.head_commit) {
                 const mappedRun = mapWorkflowRun(run, run.head_commit.tree_id);
                 // Add to list of all runs.
                 allRuns.push(mappedRun);
@@ -390,6 +400,13 @@ function main() {
                 if (new Date(mappedRun.createdAt).getTime() <
                     new Date(currentRun.createdAt).getTime()) {
                     olderRuns.push(mappedRun);
+                }
+                else if (inputs.includePreviousAttemptsOfSameRun &&
+                    isPreviousAttemptAtThisRun(currentRun, mappedRun)) {
+                    olderRuns.push(mappedRun);
+                }
+                else {
+                    core.debug(`Filtered out due to createdAt time being newer than this run's creation time: ${run.html_url}`);
                 }
             }
         }
@@ -408,6 +425,7 @@ function mapWorkflowRun(run, treeHash) {
     return {
         id: run.id,
         runNumber: run.run_number,
+        runAttempt: run.run_attempt,
         event: run.event,
         treeHash,
         commitHash: run.head_sha,
@@ -618,6 +636,50 @@ function getPathsFilterInput(name) {
         }
         exitFail(`Input '${rawInput}' is invalid`);
     }
+}
+/**
+ * Fetches all previous attempts for the current workflow run.
+ * @param octokit
+ * @param repo
+ * @param currentRunId - The unique ID of the workflow run.
+ * @param currentAttempt - The current attempt
+ * @returns A promise that resolves to an array of workflow run objects.
+ */
+function getPreviousRunAttempts({ octokit, repo, currentRun: { id: currentRunId, runAttempt: currentRunAttempt } }) {
+    return __awaiter(this, void 0, void 0, function* () {
+        // We'll store all the resulting attempt objects here
+        const allAttemptsData = []; // Use a more specific type if you have it
+        let attemptNumber = 1;
+        // Use a traditional for loop to iterate from 1 to currentAttempt
+        while (typeof currentRunAttempt === 'undefined' ||
+            attemptNumber < currentRunAttempt) {
+            core.debug(`Fetching attempt ${attemptNumber}...`);
+            try {
+                // Wait for the single request to complete
+                const response = yield octokit.rest.actions.getWorkflowRunAttempt(Object.assign(Object.assign({}, repo), { run_id: currentRunId, attempt_number: attemptNumber }));
+                // Add the result to our array
+                allAttemptsData.push(response.data);
+                attemptNumber++;
+            }
+            catch (error) {
+                // This stops us from carrying on indefinitely if we don't know the current run attempt.
+                if (error instanceof request_error_1.RequestError && error.status === 404) {
+                    break;
+                }
+                // For any other error (rate limit, auth, etc.), log it and stop.
+                core.error(`Failed to retrieve attempt ${attemptNumber}`);
+                throw error; // Re-throw the unexpected error
+            }
+        }
+        core.debug('');
+        return allAttemptsData;
+    });
+}
+function isPreviousAttemptAtThisRun({ runAttempt: currentRunAttempt, id: currentRunId }, { runAttempt, id }) {
+    return (currentRunId === id &&
+        typeof runAttempt !== 'undefined' &&
+        typeof currentRunAttempt !== 'undefined' &&
+        runAttempt < currentRunAttempt);
 }
 main();
 
