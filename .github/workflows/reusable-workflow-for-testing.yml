@@ -1,0 +1,25 @@
+name: Reusable Workflow Test
+
+on:
+  workflow_call:
+
+jobs:
+  reusable_job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Skip duplicate runs
+        id: skip_check
+        uses: ./
+        with:
+          # When this workflow is re-run (e.g. manually), the previous successful attempt should cause this to be skipped.
+          include_previous_attempts_of_same_run: 'true'
+          skip_after_successful_duplicate: 'true'
+          # avoid skipping because of other concurrent runs of this workflow.
+          concurrent_skipping: 'never'
+
+      - name: A step that runs
+        if: ${{ steps.skip_check.outputs.should_skip != 'true' }}
+        run: echo "This step should only run on the first attempt of this reusable workflow."
